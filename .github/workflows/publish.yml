@@ -4,18 +4,17 @@ on:
     tags:
       - harness-sdk-py-v*
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,5 +34,22 @@ jobs:
           python -m pytest -q
           python -m compileall -q beeos_cloud_harness_sdk
           python -m build --sdist --wheel
-          python -m twine check dist/*
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
