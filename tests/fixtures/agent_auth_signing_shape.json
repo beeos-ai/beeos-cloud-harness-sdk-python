@@ -1,0 +1,55 @@
+{
+  "$schema_note": "Shape-only fixture for agent-auth v2. Not production secrets.",
+  "source": [
+    "agents/beeos-claw/src/agent-auth.ts",
+    "agents/beeos-claw/src/agent-auth-bound.test.ts"
+  ],
+  "version": "v2",
+  "algorithm": "Ed25519",
+  "preimage": {
+    "template": "METHOD|PATH||bodyHash|timestamp|nonce",
+    "fields": {
+      "METHOD": "HTTP method uppercased (GET, POST, …)",
+      "PATH": "decoded URL path matching Go r.URL.Path (decodeURIComponent of WHATWG pathname)",
+      "empty_query_slot": "literal empty between second and third pipe — query params forbidden on authority routes",
+      "bodyHash": "lowercase hex SHA-256 of exact request body bytes; empty body uses SHA-256 of zero bytes",
+      "timestamp": "unix seconds as decimal string",
+      "nonce": "UUID string"
+    },
+    "empty_body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "request_headers": {
+    "present": [
+      "X-Agent-Public-Key",
+      "X-Agent-Signature",
+      "X-Agent-Timestamp",
+      "X-Agent-Nonce"
+    ],
+    "absent": [
+      "X-Agent-Body-SHA256"
+    ],
+    "encoding": {
+      "X-Agent-Public-Key": "base64 raw 32-byte Ed25519 public key",
+      "X-Agent-Signature": "base64 Ed25519 signature over preimage UTF-8 bytes"
+    }
+  },
+  "key_file_shape": {
+    "json": {
+      "publicKey": "base64",
+      "privateKey": "base64"
+    },
+    "alt": "raw base64 private key seed (32 bytes) — public derived"
+  },
+  "example_preimage_parts": {
+    "method": "POST",
+    "path": "/api/v1/agents/sync",
+    "body": "{\"agents\":[]}",
+    "note": "bodyHash = sha256(utf8(body)).hex().lower(); headers built from preimage only"
+  },
+  "constraints": [
+    "sign exact body bytes that will be sent (string or Uint8Array)",
+    "forbid non-empty query string on authority URLs",
+    "redirect: error — never replay authority across redirects",
+    "signing path is decoded, not percent-encoded"
+  ]
+}

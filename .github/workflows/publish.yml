@@ -1,0 +1,39 @@
+name: Publish Harness SDK to PyPI
+on:
+  push:
+    tags:
+      - harness-sdk-py-v*
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify release tag
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          if os.environ['GITHUB_REF_NAME'] != f'harness-sdk-py-v{version}':
+              raise SystemExit('Release tag does not match the package version')
+          PY
+      - name: Test and build
+        run: |
+          python -m pip install . pytest pytest-asyncio build twine
+          python -m pytest -q
+          python -m compileall -q beeos_cloud_harness_sdk
+          python -m build --sdist --wheel
+          python -m twine check dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1
