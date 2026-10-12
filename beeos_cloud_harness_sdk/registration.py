@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from beeos_cloud_harness_sdk.identity import AgentKeyPair, _private_from_seed
 from beeos_cloud_harness_sdk.retry import BackoffPolicy, delay_for_attempt, is_transient_error
@@ -50,6 +50,11 @@ IDENTITY_FILE_NAME = "runtime-registration-identity.json"
 FENCED_RETRY = BackoffPolicy(float("inf"), 30_000, 300_000, 2)
 #: Consecutive heartbeat transport failures tolerated before the lease is treated as lost.
 HEARTBEAT_TRANSPORT_FAILURE_THRESHOLD = 3
+
+#: Wire enum of ``msConnectionStatus`` accepted by Agent Gateway.
+MS_CONNECTION_STATUSES = frozenset(
+    {"unknown", "connecting", "connected", "reconnecting", "disconnected", "failed"}
+)
 
 _HANDOFF_RE = re.compile(
     r"active runtime lease requires explicit handoff|waiting for the active runtime lease",
@@ -152,6 +157,22 @@ class RuntimeRegistrationIntentConflict(RuntimeRegistrationError):
         super().__init__("registration_id intent conflict")
 
 
+def _read_ms_connection_status(
+    reporter: Callable[[RuntimeActiveLease], str], lease: RuntimeActiveLease
+) -> str:
+    """Current MS state for a heartbeat; anything unreadable is honestly ``unknown``.
+
+    A bad value would make Agent Gateway reject the whole heartbeat and cost the
+    lease, so the reporter can neither fail the heartbeat nor widen the wire enum.
+    """
+    try:
+        status = str(reporter(lease))
+    except Exception:  # noqa: BLE001
+        logger.warning("ms connection status unavailable for heartbeat", exc_info=True)
+        return "unknown"
+    return status if status in MS_CONNECTION_STATUSES else "unknown"
+
+
 @dataclass
 class RuntimeRegistrationCoordinator:
     """Owns register + heartbeat loop for one process generation."""
@@ -169,6 +190,11 @@ class RuntimeRegistrationCoordinator:
     fenced_retry: BackoffPolicy = FENCED_RETRY
     heartbeat_failure_threshold: int = HEARTBEAT_TRANSPORT_FAILURE_THRESHOLD
     now: Any = field(default=None)
+    #: Reports the Message Service connection state of the given lease. When set,
+    #: every heartbeat signs and carries it as ``msConnectionStatus``. Left unset,
+    #: the heartbeat stays the legacy three-field payload (the field is optional
+    #: on the wire and must not be defaulted before hashing).
+    get_ms_connection_status: Callable[[RuntimeActiveLease], str] | None = None
     active: RuntimeActiveLease | None = field(default=None, init=False)
     # Set when an active lease is acquired; cleared on loss / stop.
     # agents/sync waits on this instead of blind sleeps during handoff.
@@ -362,6 +388,10 @@ class RuntimeRegistrationCoordinator:
             "handlerIdentity": self.identity.handler_identity,
             "runtimeEpoch": lease.runtime_epoch,
         }
+        if self.get_ms_connection_status is not None:
+            payload["msConnectionStatus"] = _read_ms_connection_status(
+                self.get_ms_connection_status, lease
+            )
         body = self._sign_proof("runtime.heartbeat", payload)
         try:
             result = await self.transport.heartbeat_runtime(
