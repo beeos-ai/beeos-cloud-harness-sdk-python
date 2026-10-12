@@ -1,4 +1,5 @@
 name: Publish Harness SDK to PyPI
+# Release tags must point to a commit on main.
 on:
   push:
     tags:
@@ -12,6 +13,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require a release tag on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)
+          [[ "$status" == identical || "$status" == behind ]] || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
