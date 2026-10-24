@@ -259,9 +259,14 @@ class GatewayCanvas:
     def __init__(self, gw: AgentGatewayClient) -> None:
         self._gw = gw
 
-    async def token(self) -> dict[str, Any]:
-        """``{token, relayUrl, expiresAt}``; unwraps the optional ``data`` envelope."""
-        raw = await self._gw.json("POST", operation_path("canvasTokenCreate"), {}, retry=TRANSIENT_BACKOFF)
+    async def token(self, sandbox_id: str | None = None) -> dict[str, Any]:
+        """``{token, relayUrl, expiresAt}``; unwraps the optional ``data`` envelope.
+
+        A Sandbox v1 guest names its claimed ``sandbox_id``: the Gateway then
+        signs an Agent-scoped token from the Sandbox Binding (no instance).
+        """
+        body_in = {"sandbox_id": sandbox_id} if sandbox_id else {}
+        raw = await self._gw.json("POST", operation_path("canvasTokenCreate"), body_in, retry=TRANSIENT_BACKOFF)
         body = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
         token = str(body.get("token") or "") if isinstance(body, dict) else ""
         if not token:
