@@ -15,6 +15,7 @@ from typing import Any
 
 REGISTRATION_HASH_DOMAIN = "beeos.runtime.registration.v1"
 HEARTBEAT_HASH_DOMAIN = "beeos.runtime.heartbeat.v1"
+NATIVE_SESSION_REQUEST_HASH_DOMAIN = "beeos.runtime.request.v1"
 # Types4 RuntimeAgentProjectionHashPayload (@beeos-ai/beeos-types@4.1.0).
 AGENT_PROJECTION_HASH_DOMAIN = "beeos.runtime.agent-projection.v1"
 
@@ -72,3 +73,46 @@ def runtime_domain_hash(domain: str, payload: Any) -> str:
 def _utf16_key(key: str) -> list[int]:
     """Sort key as UTF-16 code units (RFC 8785 object key order)."""
     return list(key.encode("utf-16-be"))
+
+
+def native_session_request_hash(rpc: dict[str, Any]) -> str:
+    """Hash a native Session RPC in State's exact safe-integer JSON domain.
+
+    This deliberately uses the existing JCS/hash implementation only after
+    rejecting floats and unsafe integers. Python's float formatter is not an
+    ECMAScript number formatter and must not sign an approximate native hash.
+    """
+    if not isinstance(rpc, dict) or rpc.get("jsonrpc") != "2.0" or rpc.get("method") != "session/prompt":
+        raise ValueError("native Session RPC is required")
+    _require_native_session_json(rpc)
+    return runtime_domain_hash(NATIVE_SESSION_REQUEST_HASH_DOMAIN, rpc)
+
+
+def verify_native_session_request(request: dict[str, Any]) -> str:
+    """Verify the retained native carrier's hash; this is not grant verification."""
+    if not isinstance(request, dict) or request.get("method") != "session/prompt":
+        raise ValueError("native Session carrier is required")
+    actual = native_session_request_hash(request.get("request"))
+    if request.get("requestHash") != actual:
+        raise ValueError("native request hash does not commit the original RPC")
+    return actual
+
+
+def _require_native_session_json(value: Any) -> None:
+    if value is None or type(value) is bool:
+        return
+    if type(value) is int and abs(value) <= 9007199254740991:
+        return
+    if isinstance(value, str):
+        value.encode("utf-8")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _require_native_session_json(item)
+        return
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        for key, item in value.items():
+            key.encode("utf-8")
+            _require_native_session_json(item)
+        return
+    raise ValueError("native Session RPC requires exact JSON safe-integer units")

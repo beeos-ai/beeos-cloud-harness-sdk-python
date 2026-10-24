@@ -6,6 +6,9 @@ from typing import Any, get_args
 
 from ._generated.models import RuntimeMessagePatch, RuntimeMethod
 from ._generated.operations import OPERATIONS, operation_path
+from .runtime_chat_store import RuntimeChatStore
+from .runtime_original_intent import RuntimeOriginalIntent
+from .runtime_memory import RuntimeMemory
 
 RUNTIME_METHODS: list[str] = list(get_args(RuntimeMethod))
 
@@ -17,6 +20,27 @@ class BeeOSAgentError(RuntimeError):
     def __init__(self, status: int, code: str, message: str):
         super().__init__(message)
         self.status, self.code = status, code
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A runtime lease/grant must never follow a redirect to another origin.
+        return None
+
+
+def _backend_error(status: int, raw, fallback: str = "agent_backend_unavailable"):
+    message = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    code = fallback
+    try:
+        parsed = json.loads(message)
+        if isinstance(parsed, dict):
+            detail = parsed.get("error", parsed)
+            if isinstance(detail, dict):
+                code = detail.get("code") if isinstance(detail.get("code"), str) else code
+                message = detail.get("message") if isinstance(detail.get("message"), str) else message
+    except ValueError:
+        pass
+    return BeeOSAgentError(status, code, message)
 
 class BeeOSAgentRuntime:
     def __init__(self, agent_gateway_url: str, message_service_url: str, instance_id: str, agent_id: str, token: str | Callable[[], str], framework: str = "custom", transport=None):
@@ -36,6 +60,9 @@ class BeeOSAgentRuntime:
         self.agent = _Agent(self)
         self.messages = _Messages(self)
         self.chat = _Chat(self)
+        self.chat_store = RuntimeChatStore(self)
+        self.original_intent = RuntimeOriginalIntent(self)
+        self.memory = RuntimeMemory(self)
         self.files = _Files(self)
         self.canvas = _Canvas(self)
         self.a2a = _A2a(self)
@@ -70,26 +97,19 @@ class BeeOSAgentRuntime:
         if self._transport:
             status, raw, _resp = self._transport(method, url, req_headers, data)
             if status >= 400:
-                raise BeeOSAgentError(status, "agent_backend_unavailable", raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw))
+                raise _backend_error(status, raw)
             if status == 204 or not raw:
                 return None
             return json.loads(raw)
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.build_opener(_NoRedirect()).open(req) as resp:
                 raw = resp.read()
                 if resp.status == 204 or not raw:
                     return None
                 return json.loads(raw.decode())
         except urllib.error.HTTPError as err:
-            payload = err.read().decode()
-            code, message = "agent_backend_unavailable", err.reason
-            try:
-                parsed = json.loads(payload)
-                code, message = parsed.get("code", code), parsed.get("message", message)
-            except Exception:
-                pass
-            raise BeeOSAgentError(err.code, code, message) from err
+            raise _backend_error(err.code, err.read()) from err
 
     def _call(self, operation_id: str, json_body=None, headers=None, **path_params):
         method, _path, service = OPERATIONS[operation_id]

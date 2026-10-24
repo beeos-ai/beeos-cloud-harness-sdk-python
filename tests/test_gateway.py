@@ -33,6 +33,18 @@ async def test_signs_every_request_with_the_four_agent_headers():
     assert "x-agent-body-sha256" not in req.headers
 
 
+async def test_canvas_token_names_the_claimed_sandbox_only_when_given():
+    bodies: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content or b"{}"))
+        return httpx.Response(200, json={"token": "t"})
+
+    await gateway(handler).canvas.token(sandbox_id="sandbox-1")
+    await gateway(handler).canvas.token()
+    assert bodies == [{"sandbox_id": "sandbox-1"}, {}]
+
+
 async def test_get_retries_transient_status_then_succeeds_with_fresh_signature():
     nonces: list[str] = []
 

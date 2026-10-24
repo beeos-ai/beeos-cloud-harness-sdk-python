@@ -1,6 +1,6 @@
 [project]
 name = "beeos-cloud-harness-sdk"
-version = "1.0.0"
+version = "1.0.1"
 description = "BeeOS Cloud Harness SDK"
 readme = "README.md"
 license = "MIT"
