@@ -34,6 +34,7 @@ from beeos_cloud_harness_sdk.retry import (
 
 _UNSET: Final = object()
 _JSON = {"Content-Type": "application/json"}
+CANVAS_RUNTIME_LEASE_HEADER: Final = "X-BeeOS-Runtime-Lease"
 
 
 class _TransientAnswer(Exception):
@@ -259,14 +260,22 @@ class GatewayCanvas:
     def __init__(self, gw: AgentGatewayClient) -> None:
         self._gw = gw
 
-    async def token(self, sandbox_id: str | None = None) -> dict[str, Any]:
+    async def token(self, sandbox_id: str | None = None, *, runtime_lease: str | None = None) -> dict[str, Any]:
         """``{token, relayUrl, expiresAt}``; unwraps the optional ``data`` envelope.
 
         A Sandbox v1 guest names its claimed ``sandbox_id``: the Gateway then
-        signs an Agent-scoped token from the Sandbox Binding (no instance).
+        signs an Agent-scoped token from the Sandbox Binding (no instance) and
+        requires the allocation's current ``runtime_lease``, bound to the
+        signing key and verified online (doc 21 P1). Older Gateways ignore the
+        header.
         """
         body_in = {"sandbox_id": sandbox_id} if sandbox_id else {}
-        raw = await self._gw.json("POST", operation_path("canvasTokenCreate"), body_in, retry=TRANSIENT_BACKOFF)
+        lease = (runtime_lease or "").strip()
+        headers = {CANVAS_RUNTIME_LEASE_HEADER: lease} if lease else None
+        raw = await self._gw.json(
+            "POST", operation_path("canvasTokenCreate"), body_in,
+            retry=TRANSIENT_BACKOFF, headers=headers,
+        )
         body = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
         token = str(body.get("token") or "") if isinstance(body, dict) else ""
         if not token:
