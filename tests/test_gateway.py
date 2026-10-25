@@ -45,6 +45,20 @@ async def test_canvas_token_names_the_claimed_sandbox_only_when_given():
     assert bodies == [{"sandbox_id": "sandbox-1"}, {}]
 
 
+async def test_canvas_token_presents_the_runtime_lease_only_when_given():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"token": "t"})
+
+    gw = gateway(handler)
+    await gw.canvas.token(sandbox_id="sandbox-1", runtime_lease="lease-jwt")
+    await gw.canvas.token(sandbox_id="sandbox-1")
+    assert seen[0].headers["X-BeeOS-Runtime-Lease"] == "lease-jwt"
+    assert "X-BeeOS-Runtime-Lease" not in seen[1].headers
+
+
 async def test_get_retries_transient_status_then_succeeds_with_fresh_signature():
     nonces: list[str] = []
 
