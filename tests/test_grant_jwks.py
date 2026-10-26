@@ -91,10 +91,28 @@ def test_actual_rsa_original_and_renewed_grants_keep_first_compact_hash_and_actu
     ("sub", "foreign"), ("handlerIdentity", "foreign"), ("operationId", "foreign"), ("requestMessageId", "foreign"),
     ("instanceId", "foreign"), ("leaseId", "foreign"), ("dispatchEpoch", "7"), ("requestHash", "f" * 64),
     ("paramsHash", "f" * 64), ("commandHash", "f" * 64), ("idempotencyKeyHash", "f" * 64),
-    ("iat", 2000000001), ("exp", 2000000000), ("exp", 2000000061), ("iat", True), ("exp", 2000000030.0),
+    ("iat", 2000000031), ("exp", 1999999969), ("exp", 2000000061), ("iat", True), ("exp", 2000000030.0),
 ])
 def test_signed_but_wrong_original_claims_never_authorize(key, name, value):
     f = fixture(key); f.verifier.refresh(); f.claims[name] = value
+    with pytest.raises(ValueError, match="original signed intent"):
+        f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
+
+
+def test_thirty_second_clock_skew_covers_each_deadline_direction(key):
+    f = fixture(key); f.verifier.refresh()
+    now = int(f.clock[0])
+    # A grant that expired 5s ago is still inside the tolerated skew.
+    f.claims.update(iat=now - 35, exp=now - 5)
+    f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
+    # Five minutes late is a real expiry, not skew.
+    f.claims.update(iat=now - 330, exp=now - 300)
+    with pytest.raises(ValueError, match="original signed intent"):
+        f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
+    # The guest clock may trail the signer by the same 30s.
+    f.claims.update(iat=now + 30, exp=now + 60)
+    f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
+    f.claims.update(iat=now + 31, exp=now + 61)
     with pytest.raises(ValueError, match="original signed intent"):
         f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
 

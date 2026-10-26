@@ -26,6 +26,8 @@ from .jcs import _require_native_session_json, canonicalize_jcs, runtime_domain_
 CLOUD_GRANT_JWKS_PATH = "/.well-known/runtime-execution-grant-jwks.json"
 CLOUD_GRANT_DOMAIN = {"issuer": "beeos-cloud-gateway", "audience": "beeos-cloud-runtime-command",
                       "purpose": "cloud-runtime-execution-grant", "maxClaimTtlSeconds": 60}
+# Go already accepts this skew; guests must not be stricter than the signer.
+CLOUD_GRANT_CLOCK_SKEW_SECONDS = 30
 _B64 = re.compile(r"[A-Za-z0-9_-]+")
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 
@@ -188,7 +190,8 @@ class CloudGatewayGrantJwksVerifier:
             or target.get("operationId") != r.get("operationId") or target.get("runtimeInstanceUid") != r.get("instanceId")
             or target.get("dispatchEpoch") != r.get("dispatchEpoch") or target.get("paramsHash") != r.get("paramsHash")
             or not _same(g.get("command"), command) or not _safe_integer(g.get("iat")) or not _safe_integer(g.get("exp"))
-            or g["iat"] > now or g["exp"] <= now or g["exp"] <= g["iat"] or g["exp"] - g["iat"] > 60
+            or g["iat"] > now + CLOUD_GRANT_CLOCK_SKEW_SECONDS or g["exp"] + CLOUD_GRANT_CLOCK_SKEW_SECONDS < now
+            or g["exp"] <= g["iat"] or g["exp"] - g["iat"] > 60
             or g.get("sub") != handler or g.get("handlerIdentity") != handler
             or any(not _text(r.get(key)) or g.get(key) != r.get(key) for key in fields)
             or rpc.get("jsonrpc") != "2.0" or rpc.get("method") != "session/prompt" or command.get("name") != "session.prompt"
