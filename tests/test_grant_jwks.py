@@ -11,7 +11,8 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from beeos_cloud_harness_sdk.grant_jwks import CloudGatewayGrantJwksVerifier, CLOUD_GRANT_DOMAIN, CLOUD_GRANT_JWKS_PATH
+from beeos_cloud_harness_sdk.grant_jwks import (CloudGatewayGrantJwksVerifier, CLOUD_GRANT_DOMAIN,
+                                               CLOUD_GRANT_JWKS_PATH, GRANT_REASONS)
 from beeos_cloud_harness_sdk.jcs import native_session_request_hash, runtime_domain_hash
 
 
@@ -115,6 +116,36 @@ def test_thirty_second_clock_skew_covers_each_deadline_direction(key):
     f.claims.update(iat=now + 31, exp=now + 61)
     with pytest.raises(ValueError, match="original signed intent"):
         f.verifier.verify_original(f.request, f.sign(), f.lease, lambda: f.lease)
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("expired", "grant_expired"), ("iat_future", "grant_iat_future"),
+    ("issuer", "grant_issuer_mismatch"), ("audience", "grant_audience_mismatch"),
+    ("binding", "grant_binding_mismatch"), ("jwks", "grant_jwks_unavailable"),
+    ("signature", "grant_signature_invalid"),
+])
+def test_rejections_report_a_distinct_reason_on_the_same_value_error(key, case, expected):
+    f = fixture(key)
+    if case != "jwks":
+        f.verifier.refresh()
+    now = int(f.clock[0])
+    if case == "expired":
+        f.claims.update(iat=now - 330, exp=now - 300); token = f.sign()
+    elif case == "iat_future":
+        f.claims.update(iat=now + 31, exp=now + 61); token = f.sign()
+    elif case == "issuer":
+        f.claims["iss"] = "foreign"; token = f.sign()
+    elif case == "audience":
+        f.claims["aud"] = "foreign"; token = f.sign()
+    elif case == "binding":
+        f.request["command"]["name"] = "agent.run"; token = f.sign()
+    elif case == "jwks":
+        token = f.sign()
+    else:
+        token = f.sign(signing_key=rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    assert expected in GRANT_REASONS
+    with pytest.raises(ValueError, match=f"original signed intent is invalid: {expected}$"):
+        f.verifier.verify_original(f.request, token, f.lease, lambda: f.lease)
 
 
 @pytest.mark.parametrize("case", ["rpc", "params", "command", "conversation", "embedded-grant", "unsafe-context", "subject", "first-hash", "current-lease", "inline-private", "config-pin", "persona-ref", "run-id", "task-id", "task-request-id"])

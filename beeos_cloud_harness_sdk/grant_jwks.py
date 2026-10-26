@@ -28,6 +28,17 @@ CLOUD_GRANT_DOMAIN = {"issuer": "beeos-cloud-gateway", "audience": "beeos-cloud-
                       "purpose": "cloud-runtime-execution-grant", "maxClaimTtlSeconds": 60}
 # Go already accepts this skew; guests must not be stricter than the signer.
 CLOUD_GRANT_CLOCK_SKEW_SECONDS = 30
+# Diagnostic reasons appended to the stable ValueError message. Callers match the
+# prefix, so these never change the error type or the accepted/rejected outcome.
+GRANT_REASONS = frozenset({"grant_expired", "grant_iat_future", "grant_issuer_mismatch",
+                           "grant_audience_mismatch", "grant_binding_mismatch",
+                           "grant_jwks_unavailable", "grant_signature_invalid"})
+
+
+def _invalid(reason: str) -> ValueError:
+    return ValueError(f"central native original signed intent is invalid: {reason}")
+
+
 _B64 = re.compile(r"[A-Za-z0-9_-]+")
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 
@@ -122,28 +133,39 @@ class CloudGatewayGrantJwksVerifier:
         self._keys, self._expires_at = keys, self._now() + self._ttl
         self.provenance = {"sourceUrl": self.keyset_url, "etag": response.headers["etag"], **CLOUD_GRANT_DOMAIN}
 
-    def verify_and_decode_grant(self, compact_jwt: str) -> dict[str, Any] | None:
+    def _decode_grant(self, compact_jwt: str) -> tuple[dict[str, Any] | None, str | None]:
+        """Returns the verified grant, or why verification stopped, for diagnostics."""
         if not isinstance(compact_jwt, str) or not self._keys or self._now() >= self._expires_at:
-            return None
+            return None, "grant_jwks_unavailable"
         try:
             parts = compact_jwt.split(".")
             if len(parts) != 3:
-                return None
+                return None, "grant_signature_invalid"
             header = json.loads(_decode(parts[0]).decode("utf-8"))
             claims = json.loads(_decode(parts[1]).decode("utf-8"))
             signature = _decode(parts[2])
             if (not isinstance(header, dict) or header.get("alg") != "RS256" or header.get("typ") != "JWT"
-                    or not isinstance(header.get("kid"), str) or header["kid"] not in self._keys
-                    or not isinstance(claims, dict)):
-                return None
-            self._keys[header["kid"]].verify(signature, (parts[0] + "." + parts[1]).encode("ascii"),
-                                              padding.PKCS1v15(), hashes.SHA256())
-            if any(claims.get(field) != CLOUD_GRANT_DOMAIN[name] for field, name in
-                   (("iss", "issuer"), ("aud", "audience"), ("purpose", "purpose"))):
-                return None
-            return {"header": header, "claims": claims, "compactHash": hashlib.sha256(compact_jwt.encode()).hexdigest()}
-        except (ValueError, TypeError, KeyError, UnicodeError, InvalidSignature):
-            return None
+                    or not isinstance(header.get("kid"), str) or not isinstance(claims, dict)):
+                return None, "grant_signature_invalid"
+            key = self._keys.get(header["kid"])
+            if key is None:
+                return None, "grant_signature_invalid"
+            key.verify(signature, (parts[0] + "." + parts[1]).encode("ascii"),
+                       padding.PKCS1v15(), hashes.SHA256())
+            if claims.get("iss") != CLOUD_GRANT_DOMAIN["issuer"]:
+                return None, "grant_issuer_mismatch"
+            if claims.get("aud") != CLOUD_GRANT_DOMAIN["audience"]:
+                return None, "grant_audience_mismatch"
+            if claims.get("purpose") != CLOUD_GRANT_DOMAIN["purpose"]:
+                return None, "grant_binding_mismatch"
+            return {"header": header, "claims": claims, "compactHash": hashlib.sha256(compact_jwt.encode()).hexdigest()}, None
+        except InvalidSignature:
+            return None, "grant_signature_invalid"
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            return None, "grant_signature_invalid"
+
+    def verify_and_decode_grant(self, compact_jwt: str) -> dict[str, Any] | None:
+        return self._decode_grant(compact_jwt)[0]
 
     def verify_original(self, request: dict[str, Any], execution_grant: str, lease: Any,
                         get_lease: Callable[[], Any | None]) -> VerifiedCentralNativeIntent:
@@ -153,9 +175,11 @@ class CloudGatewayGrantJwksVerifier:
         fresh JWT binds the same full original claims; its compact hash need
         not equal that historical value.
         """
-        decoded = self.verify_and_decode_grant(execution_grant)
-        if not isinstance(request, dict) or decoded is None:
-            raise ValueError("central native original signed intent is invalid")
+        decoded, reason = self._decode_grant(execution_grant)
+        if not isinstance(request, dict):
+            raise _invalid("grant_binding_mismatch")
+        if decoded is None:
+            raise _invalid(reason or "grant_signature_invalid")
         r, g = request, decoded["claims"]
         rpc = _object(r.get("request")); p = _object(rpc.get("params")); c = _object(p.get("centralChat"))
         command = _object(r.get("command")); target = _object(command.get("context"))
@@ -173,6 +197,13 @@ class CloudGatewayGrantJwksVerifier:
             if not active or not all(identity) or _lease_identity(active) != identity or not valid:
                 raise ValueError("central native execution is fenced")
         now = int(self._now())
+        if (not _safe_integer(g.get("iat")) or not _safe_integer(g.get("exp"))
+                or g["exp"] <= g["iat"] or g["exp"] - g["iat"] > 60):
+            raise _invalid("grant_binding_mismatch")
+        if g["exp"] + CLOUD_GRANT_CLOCK_SKEW_SECONDS < now:
+            raise _invalid("grant_expired")
+        if g["iat"] > now + CLOUD_GRANT_CLOCK_SKEW_SECONDS:
+            raise _invalid("grant_iat_future")
         fields = ("operationId", "requestMessageId", "instanceId", "leaseId", "dispatchEpoch", "requestHash", "paramsHash", "commandHash", "idempotencyKeyHash")
         invalid = (r.get("schemaVersion") != 2 or r.get("method") != "session/prompt" or "centralChat" not in p
             or not _text(p.get("runtimeRunId")) or p.get("taskId") != r.get("operationId")
@@ -189,9 +220,7 @@ class CloudGatewayGrantJwksVerifier:
             or conversation.get("runtimeSessionKey") != c.get("session_id") or target.get("historyGeneration") != c.get("history_generation")
             or target.get("operationId") != r.get("operationId") or target.get("runtimeInstanceUid") != r.get("instanceId")
             or target.get("dispatchEpoch") != r.get("dispatchEpoch") or target.get("paramsHash") != r.get("paramsHash")
-            or not _same(g.get("command"), command) or not _safe_integer(g.get("iat")) or not _safe_integer(g.get("exp"))
-            or g["iat"] > now + CLOUD_GRANT_CLOCK_SKEW_SECONDS or g["exp"] + CLOUD_GRANT_CLOCK_SKEW_SECONDS < now
-            or g["exp"] <= g["iat"] or g["exp"] - g["iat"] > 60
+            or not _same(g.get("command"), command)
             or g.get("sub") != handler or g.get("handlerIdentity") != handler
             or any(not _text(r.get(key)) or g.get(key) != r.get(key) for key in fields)
             or rpc.get("jsonrpc") != "2.0" or rpc.get("method") != "session/prompt" or command.get("name") != "session.prompt"
@@ -216,7 +245,7 @@ class CloudGatewayGrantJwksVerifier:
                                         or not all(_text(value) for value in persona.values())))
             or "execution_grant" in c or "executionGrant" in c)
         if invalid:
-            raise ValueError("central native original signed intent is invalid")
+            raise _invalid("grant_binding_mismatch")
         current()
         binding = {key: copy.deepcopy(c[key]) for key in ("session_id", "history_generation", "branch_id", "response_id", "attempt_id", "context", "writer")}
         binding["operation_id"] = r["operationId"]
